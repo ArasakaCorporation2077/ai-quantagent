@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 import yaml
+from dotenv import load_dotenv
 
 
 def _find_project_root() -> Path:
@@ -16,6 +17,9 @@ def _find_project_root() -> Path:
 
 PROJECT_ROOT = _find_project_root()
 
+# Load .env file from project root
+load_dotenv(PROJECT_ROOT / '.env')
+
 
 def load_config(config_path: str | None = None) -> dict:
     """Load the main configuration file."""
@@ -25,14 +29,16 @@ def load_config(config_path: str | None = None) -> dict:
         return yaml.safe_load(f)
 
 
-def load_secrets(secrets_path: str | None = None) -> dict:
-    """Load the secrets file with API keys."""
-    if secrets_path is None:
-        secrets_path = PROJECT_ROOT / 'config' / 'secrets.yaml'
-    if not os.path.exists(secrets_path):
-        return {}
-    with open(secrets_path, 'r', encoding='utf-8') as f:
-        return yaml.safe_load(f) or {}
+def load_secrets() -> dict:
+    """Load secrets from environment variables (.env file)."""
+    return {
+        'openai_api_key': os.getenv('OPENAI_API_KEY', ''),
+        'anthropic_api_key': os.getenv('ANTHROPIC_API_KEY', ''),
+        'hyperliquid': {
+            'account_address': os.getenv('HYPERLIQUID_ACCOUNT_ADDRESS', ''),
+            'secret_key': os.getenv('HYPERLIQUID_SECRET_KEY', ''),
+        },
+    }
 
 
 def get_data_dir(config: dict) -> Path:

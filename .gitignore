@@ -2,6 +2,7 @@ data/
 db/
 logs/
 config/secrets.yaml
+.env
 __pycache__/
 *.pyc
 .env
