@@ -1,0 +1,77 @@
+project:
+  name: ai-quantagent
+  data_dir: data
+  db_path: db/alpha_research.db
+  log_dir: logs
+
+symbols:
+  - DOGEUSDT
+  - XRPUSDT
+  - LTCUSDT
+  - BNBUSDT
+  - BCHUSDT
+  - EOSUSDT
+  - ADAUSDT
+  - LINKUSDT
+  - XLMUSDT
+  - AVAXUSDT
+  - 1000SHIBUSDT
+  - SUIUSDT
+  - DOTUSDT
+  - NEARUSDT
+  - APTUSDT
+  - UNIUSDT
+  - TONUSDT
+  - BTCUSDT
+  - ETHUSDT
+  - SOLUSDT
+
+frequencies:
+  - 1h
+  - 4h
+  - 12h
+  - 1d
+
+data:
+  base_url: https://data.binance.vision/data/futures/um
+  granularity: monthly
+  start_date: "2022-01-01"
+  end_date: "2026-02-28"
+  download_retries: 3
+  download_timeout: 60
+  max_concurrent: 20
+
+llm:
+  provider: openai
+  model: gpt-5-mini
+  temperature_stage1: 1.0
+  temperature_stage2: 0.3
+  max_retries: 3
+  num_strategies_per_batch: 10
+  num_features_per_strategy: 5
+
+backtest:
+  transaction_cost_bps: 5
+  lookahead: 1
+  min_sharpe: 0.5
+  capital: 10000
+  sampling: quarterly        # quarterly or monthly (alternating IS/OOS)
+
+pipeline:
+  max_iterations: 100
+  batch_size: 10
+  dedup_correlation_threshold: 0.85
+
+execution:
+  symbols:
+    - BTCUSDT
+    - ETHUSDT
+    - SOLUSDT
+    - XRPUSDT
+    - DOGEUSDT
+    - BNBUSDT
+    - ADAUSDT
+    - LINKUSDT
+    - AVAXUSDT
+    - LTCUSDT
+  capital: 800
