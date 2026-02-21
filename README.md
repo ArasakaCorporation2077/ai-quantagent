@@ -65,7 +65,34 @@ python main.py process                   # Process CSVs into parquet
 python main.py pipeline --iterations 10  # ~1 hour, uses GPT
 ```
 
-### 5. Generate Signal & Execute
+### 5. Set Capital
+
+Edit `config/config.yaml` to set your capital:
+
+```yaml
+execution:
+  capital: 800   # Change this to your amount (in USD)
+```
+
+| Your Capital | Recommended `capital` | Leverage | Note |
+|-------------|----------------------|----------|------|
+| $200~$500 | Same as your balance | 2x | Minimum viable, ~80% margin usage |
+| $500~$2,000 | 1.5~2x your balance | 2~3x | Good starting range |
+| $2,000~$10,000 | 1.5~2x your balance | 2~3x | Comfortable |
+| $10,000+ | 1.5x your balance | 2~3x | Consider adding more symbols |
+
+**Example**: If you have $1,000 in your Hyperliquid account, set `capital: 1500~2000` with 2x leverage. This uses ~75~100% of your margin.
+
+Leverage settings are in `src/execution/hyperliquid.py`:
+```python
+COIN_LEVERAGE = {
+    'BTC': 3,   # BTC, ETH: 3x (lower volatility)
+    'ETH': 3,
+}
+DEFAULT_LEVERAGE = 2  # Others: 2x
+```
+
+### 6. Generate Signal & Execute
 
 ```bash
 python main.py signal              # View today's signal
@@ -74,7 +101,7 @@ python main.py execute --confirm   # Execute on Hyperliquid
 python main.py positions           # Check current positions
 ```
 
-### 6. Automate (cron)
+### 7. Automate (cron)
 
 ```bash
 # Daily rebalance at UTC 00:00 (KST 09:00)
