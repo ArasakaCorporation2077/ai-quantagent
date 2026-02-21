@@ -1,6 +1,6 @@
 # AI Quantagent
 
-AI Agent Hedge Fund - LLM-powered automated alpha discovery & crypto futures trading system
+AI Agent Hedge Fund - Automated crypto futures trading with pre-built quant alphas
 
 [English](#overview) | [한국어](#개요)
 
@@ -8,23 +8,29 @@ AI Agent Hedge Fund - LLM-powered automated alpha discovery & crypto futures tra
 
 ## Overview
 
-A system that uses GPT/Claude to automatically discover quant alphas, validates them through backtesting, and runs a dollar-neutral portfolio on Hyperliquid.
+A dollar-neutral crypto futures trading system that runs on Hyperliquid. Includes 9 pre-built alpha signals (backtested on 2022-2026 data, Sharpe >= 0.5). Just add your Hyperliquid wallet and start trading.
 
 ### How It Works
 
 ```
-1. Alpha Discovery   : LLM generates trading strategy ideas → converts to math expressions
-2. Backtesting       : Validates profitability on historical data (Sharpe >= 0.5 filter)
-3. Signal Generation : Combines proven alphas → generates daily trading signals
-4. Auto Execution    : Automatic rebalancing on Hyperliquid (cron)
+1. Signal Generation : Pre-built alphas evaluate latest market data → daily trading signals
+2. Portfolio Build   : Combines 9 alphas via Sharpe-proportional weighting
+3. Auto Execution    : Automatic rebalancing on Hyperliquid (cron)
 ```
 
 ### Strategy
 
 - **Dollar Neutral**: Long exposure = Short exposure (market direction independent)
 - **Cross-sectional**: Long/short based on relative strength between coins
-- **Multi-alpha**: Multiple alphas combined via Sharpe-proportional weighting
+- **Multi-alpha**: 9 alphas combined via Sharpe-proportional weighting
 - **Daily Rebalance**: Automatic rebalancing at UTC 00:00 (KST 09:00)
+
+### Backtest Results (2022-2026)
+
+- **Annual Return**: ~25%
+- **Sharpe Ratio**: 1.01
+- **Max Drawdown**: -21%
+- **Strategy**: Dollar-neutral, 10 coins, daily rebalance
 
 ## Quick Start
 
@@ -40,38 +46,16 @@ pip install -r requirements.txt
 
 ```bash
 cp .env.example .env
-# Edit .env with your API keys
+# Edit .env with your Hyperliquid keys
 ```
 
 **Required keys:**
-- `OPENAI_API_KEY`: OpenAI API key (only needed for alpha discovery)
-- `HYPERLIQUID_ACCOUNT_ADDRESS`: Hyperliquid wallet address
-- `HYPERLIQUID_SECRET_KEY`: Hyperliquid Agent Wallet private key
+- `HYPERLIQUID_ACCOUNT_ADDRESS`: Your Hyperliquid wallet address
+- `HYPERLIQUID_SECRET_KEY`: Your Agent Wallet private key
 
-### 3. Quick Start (Use Pre-built Alphas)
+### 3. Set Capital
 
-The repo includes a pre-built database with 9 proven alphas (Sharpe >= 0.5, backtested on 2022-2026 data). You can skip data download and alpha discovery, and go straight to trading:
-
-```bash
-python main.py report              # View included alphas
-python main.py signal              # Generate today's signal
-python main.py execute             # Dry run
-python main.py execute --confirm   # Live execute on Hyperliquid
-```
-
-### 4. (Optional) Discover Your Own Alphas
-
-If you want to find additional alphas, you need an OpenAI API key:
-
-```bash
-python main.py download                  # Download Binance Futures klines
-python main.py process                   # Process CSVs into parquet
-python main.py pipeline --iterations 10  # ~1 hour, uses GPT
-```
-
-### 5. Set Capital
-
-Edit `config/config.yaml` to set your capital:
+Edit `config/config.yaml`:
 
 ```yaml
 execution:
@@ -85,9 +69,9 @@ execution:
 | $2,000~$10,000 | 1.5~2x your balance | 2~3x | Comfortable |
 | $10,000+ | 1.5x your balance | 2~3x | Consider adding more symbols |
 
-**Example**: If you have $1,000 in your Hyperliquid account, set `capital: 1500~2000` with 2x leverage. This uses ~75~100% of your margin.
+**Example**: $1,000 balance → set `capital: 1500~2000` with 2x leverage (~75~100% margin usage)
 
-Leverage settings are in `src/execution/hyperliquid.py`:
+Leverage settings in `src/execution/hyperliquid.py`:
 ```python
 COIN_LEVERAGE = {
     'BTC': 3,   # BTC, ETH: 3x (lower volatility)
@@ -96,7 +80,7 @@ COIN_LEVERAGE = {
 DEFAULT_LEVERAGE = 2  # Others: 2x
 ```
 
-### 6. Generate Signal & Execute
+### 4. Run
 
 ```bash
 python main.py signal              # View today's signal
@@ -105,7 +89,7 @@ python main.py execute --confirm   # Execute on Hyperliquid
 python main.py positions           # Check current positions
 ```
 
-### 7. Automate (cron)
+### 5. Automate (cron)
 
 ```bash
 # Daily rebalance at UTC 00:00 (KST 09:00)
@@ -117,15 +101,31 @@ crontab -e
 
 | Command | Description |
 |---------|-------------|
-| `download` | Download historical kline data from Binance |
-| `process` | Process raw CSVs into enriched parquet files |
-| `pipeline` | Run the full alpha discovery pipeline (LLM) |
-| `backtest` | Backtest a single alpha expression |
-| `combine` | Combine top alphas into a portfolio |
-| `signal` | Generate live trading signal |
+| `signal` | Generate live trading signal from combined alphas |
 | `execute` | Generate signal and execute on Hyperliquid |
 | `positions` | Show current Hyperliquid positions |
-| `report` | Show top discovered alphas from DB |
+| `report` | Show included alphas and their performance |
+| `combine` | Combine alphas into a portfolio and compare methods |
+| `backtest` | Backtest a single alpha expression |
+| `download` | Download historical kline data from Binance |
+| `process` | Process raw CSVs into enriched parquet files |
+
+## How It Makes Money
+
+This bot profits from **relative performance differences** between coins, not market direction:
+
+```
+Market goes UP:
+  Long coins rise +8%, Short coins rise +3% → Profit: +5%
+
+Market goes DOWN:
+  Long coins fall -3%, Short coins fall -8% → Profit: +5%
+
+Loss scenario:
+  Long coins underperform Short coins → Loss
+```
+
+Since Long = Short (dollar neutral), the portfolio is hedged against market-wide moves.
 
 ## Architecture
 
@@ -134,20 +134,11 @@ src/
 ├── alpha/          # Alpha parser, evaluator, validator, transforms (42 functions)
 ├── backtest/       # Backtesting engine, metrics (Sharpe/Sortino/etc), position sizing
 ├── data/           # Binance data downloader & processor
-├── execution/      # Hyperliquid order execution
-├── llm/            # LLM client (OpenAI/Anthropic), prompts, response parser
-├── orchestrator/   # Pipeline loop, alpha combiner, signal generator
+├── execution/      # Hyperliquid order execution with retry & leverage management
+├── orchestrator/   # Alpha combiner, signal generator
 ├── storage/        # SQLite database for strategies & results
 └── config.py       # Configuration loader
 ```
-
-## Key Design Decisions
-
-- **AST-based evaluation**: No `eval()` - safe recursive descent parser for alpha expressions
-- **MultiIndex panel**: (symbol, timestamp) for clean time-series/cross-section separation
-- **Free data only**: Binance Vision public klines, no paid data needed
-- **42 transform functions**: ts_mean, ts_zscore, cs_rank, decay_linear, etc.
-- **Deduplication**: SHA256 hash on expression string to avoid duplicates
 
 ## Disclaimer
 
@@ -159,23 +150,29 @@ This is an experimental research project. Use at your own risk. Past backtest pe
 
 ## 개요
 
-GPT/Claude를 활용해 퀀트 알파를 자동 발굴하고, 백테스트로 검증한 뒤, Hyperliquid에서 달러 뉴트럴 포트폴리오를 자동 운용하는 시스템입니다.
+Hyperliquid에서 운용하는 달러 뉴트럴 크립토 선물 트레이딩 시스템입니다. 검증된 9개 알파 시그널이 포함되어 있어 (2022~2026 백테스트, Sharpe >= 0.5), Hyperliquid 지갑만 연결하면 바로 트레이딩할 수 있습니다.
 
 ### 작동 방식
 
 ```
-1. 알파 발굴     : LLM이 트레이딩 전략 아이디어 생성 → 수학 수식으로 변환
-2. 백테스트      : 과거 데이터로 수익성 검증 (Sharpe >= 0.5 필터)
-3. 시그널 생성   : 검증된 알파 조합 → 일일 매매 시그널 생성
-4. 자동 실행     : Hyperliquid에서 자동 리밸런싱 (cron)
+1. 시그널 생성   : 내장된 알파가 최신 시장 데이터 분석 → 일일 매매 시그널
+2. 포트폴리오    : 9개 알파를 Sharpe 비례 가중평균으로 조합
+3. 자동 실행     : Hyperliquid에서 자동 리밸런싱 (cron)
 ```
 
 ### 전략
 
 - **달러 뉴트럴**: 롱 비중 = 숏 비중 (시장 방향과 무관하게 수익 추구)
 - **횡단면 분석**: 코인 간 상대 강도로 롱/숏 결정
-- **멀티 알파**: 여러 알파를 Sharpe 비례 가중평균으로 조합
+- **멀티 알파**: 9개 알파를 Sharpe 비례 가중평균으로 조합
 - **일일 리밸런싱**: 매일 오전 9시(한국시간) 자동 리밸런싱
+
+### 백테스트 성과 (2022~2026)
+
+- **연간 수익률**: ~25%
+- **Sharpe 비율**: 1.01
+- **최대 낙폭**: -21%
+- **전략**: 달러 뉴트럴, 10개 코인, 일일 리밸런싱
 
 ## 빠른 시작
 
@@ -191,40 +188,16 @@ pip install -r requirements.txt
 
 ```bash
 cp .env.example .env
-# .env 파일에 API 키 입력
+# .env 파일에 Hyperliquid 키 입력
 ```
 
 **필수 키:**
 - `HYPERLIQUID_ACCOUNT_ADDRESS`: Hyperliquid 지갑 주소
-- `HYPERLIQUID_SECRET_KEY`: Hyperliquid Agent Wallet 비밀키
+- `HYPERLIQUID_SECRET_KEY`: Agent Wallet 비밀키
 
-**선택 키 (알파 발굴 시에만 필요):**
-- `OPENAI_API_KEY`: OpenAI API 키
+### 3. 자본금 설정
 
-### 3. 바로 시작하기 (내장 알파 사용)
-
-레포에 검증된 9개 알파가 포함되어 있습니다 (Sharpe >= 0.5, 2022~2026 데이터 백테스트 완료). 데이터 다운로드나 알파 발굴 없이 바로 트레이딩할 수 있습니다:
-
-```bash
-python main.py report              # 포함된 알파 확인
-python main.py signal              # 오늘의 시그널 생성
-python main.py execute             # 드라이런 (주문 미리보기)
-python main.py execute --confirm   # Hyperliquid에서 실제 실행
-```
-
-### 4. (선택) 나만의 알파 발굴
-
-추가 알파를 찾고 싶으면 OpenAI API 키가 필요합니다:
-
-```bash
-python main.py download                  # Binance 선물 캔들 데이터 다운로드
-python main.py process                   # CSV → parquet 변환
-python main.py pipeline --iterations 10  # ~1시간 소요, GPT 사용
-```
-
-### 5. 자본금 설정
-
-`config/config.yaml`에서 자본금을 설정합니다:
+`config/config.yaml` 수정:
 
 ```yaml
 execution:
@@ -238,9 +211,9 @@ execution:
 | $2,000~$10,000 | 잔고의 1.5~2배 | 2~3배 | 안정적 운용 |
 | $10,000 이상 | 잔고의 1.5배 | 2~3배 | 심볼 추가 고려 |
 
-**예시**: Hyperliquid에 $1,000이 있다면, `capital: 1500~2000`으로 설정 (2배 레버리지 기준 마진 사용률 75~100%)
+**예시**: $1,000 잔고 → `capital: 1500~2000` 설정 (2배 레버리지 기준 마진 사용률 75~100%)
 
-레버리지 설정은 `src/execution/hyperliquid.py`에서 변경:
+레버리지 설정 변경: `src/execution/hyperliquid.py`
 ```python
 COIN_LEVERAGE = {
     'BTC': 3,   # BTC, ETH: 3배 (변동성 낮음)
@@ -249,7 +222,7 @@ COIN_LEVERAGE = {
 DEFAULT_LEVERAGE = 2  # 나머지: 2배
 ```
 
-### 6. 시그널 생성 및 실행
+### 4. 실행
 
 ```bash
 python main.py signal              # 오늘의 시그널 확인
@@ -258,7 +231,7 @@ python main.py execute --confirm   # 실제 주문 실행
 python main.py positions           # 현재 포지션 확인
 ```
 
-### 7. 자동화 (cron)
+### 5. 자동화 (cron)
 
 ```bash
 # 매일 오전 9시 (한국시간) 자동 리밸런싱
@@ -266,33 +239,35 @@ crontab -e
 0 0 * * * cd /path/to/ai-quantagent && python3 main.py execute --confirm >> logs/rebalance.log 2>&1
 ```
 
+## 수익 구조
+
+이 봇은 **시장 방향과 무관하게** 코인 간 **상대적 성과 차이**로 수익을 냅니다:
+
+```
+시장 상승 시:
+  롱 코인 +8% 상승, 숏 코인 +3% 상승 → 수익: +5%
+
+시장 하락 시:
+  롱 코인 -3% 하락, 숏 코인 -8% 하락 → 수익: +5%
+
+손실 조건:
+  롱 코인이 숏 코인보다 못할 때
+```
+
+롱 = 숏 (달러 뉴트럴)이므로 시장 전체 등락에 대한 헤지가 되어 있습니다.
+
 ## 명령어 목록
 
 | 명령어 | 설명 |
 |--------|------|
-| `download` | Binance 과거 캔들 데이터 다운로드 |
-| `process` | CSV를 parquet으로 가공 |
-| `pipeline` | 알파 발굴 파이프라인 실행 (LLM 사용) |
-| `backtest` | 단일 알파 수식 백테스트 |
-| `combine` | 상위 알파를 포트폴리오로 조합 |
-| `signal` | 라이브 트레이딩 시그널 생성 |
+| `signal` | 조합된 알파에서 라이브 시그널 생성 |
 | `execute` | 시그널 생성 후 Hyperliquid에서 실행 |
 | `positions` | 현재 Hyperliquid 포지션 확인 |
-| `report` | DB에서 상위 알파 조회 |
-
-## 수익 구조
-
-이 봇은 **시장 방향과 무관하게** 수익을 추구합니다:
-
-- 강할 것으로 예측된 코인은 **롱** (매수)
-- 약할 것으로 예측된 코인은 **숏** (공매도)
-- 롱 = 숏이므로 시장이 오르든 내리든, **코인 간 상대적 차이**로 수익
-
-```
-시장 상승 시: 롱 코인이 더 많이 오르면 → 수익
-시장 하락 시: 숏 코인이 더 많이 떨어지면 → 수익
-손실 조건:   롱 코인이 숏 코인보다 못할 때
-```
+| `report` | 포함된 알파와 성과 확인 |
+| `combine` | 알파를 포트폴리오로 조합하고 방법 비교 |
+| `backtest` | 단일 알파 수식 백테스트 |
+| `download` | Binance 과거 캔들 데이터 다운로드 |
+| `process` | CSV를 parquet으로 가공 |
 
 ## 주의사항
 
