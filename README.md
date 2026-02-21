@@ -35,29 +35,35 @@ pip install -r requirements.txt
 ### 2. Configure
 
 ```bash
-cp config/secrets.yaml.example config/secrets.yaml
-# Edit secrets.yaml with your API keys
+cp .env.example .env
+# Edit .env with your API keys
 ```
 
 **Required keys:**
-- `openai_api_key`: OpenAI API key (for alpha discovery)
-- `hyperliquid.account_address`: Hyperliquid wallet address
-- `hyperliquid.secret_key`: Hyperliquid Agent Wallet private key
+- `OPENAI_API_KEY`: OpenAI API key (only needed for alpha discovery)
+- `HYPERLIQUID_ACCOUNT_ADDRESS`: Hyperliquid wallet address
+- `HYPERLIQUID_SECRET_KEY`: Hyperliquid Agent Wallet private key
 
-### 3. Download & Process Data
+### 3. Quick Start (Use Pre-built Alphas)
 
-```bash
-python main.py download    # Download Binance Futures klines
-python main.py process     # Process CSVs into parquet
-```
-
-### 4. Discover Alphas
+The repo includes a pre-built database with 9 proven alphas (Sharpe >= 0.5, backtested on 2022-2026 data). You can skip data download and alpha discovery, and go straight to trading:
 
 ```bash
-python main.py pipeline --iterations 10
+python main.py report              # View included alphas
+python main.py signal              # Generate today's signal
+python main.py execute             # Dry run
+python main.py execute --confirm   # Live execute on Hyperliquid
 ```
 
-This uses GPT to generate alpha ideas, converts them to math expressions, and backtests each one. Takes ~1 hour for 10 iterations.
+### 4. (Optional) Discover Your Own Alphas
+
+If you want to find additional alphas, you need an OpenAI API key:
+
+```bash
+python main.py download                  # Download Binance Futures klines
+python main.py process                   # Process CSVs into parquet
+python main.py pipeline --iterations 10  # ~1 hour, uses GPT
+```
 
 ### 5. Generate Signal & Execute
 

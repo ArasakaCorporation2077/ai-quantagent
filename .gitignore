@@ -1,5 +1,5 @@
 data/
-db/
+db/*.db-journal
 logs/
 config/secrets.yaml
 .env
