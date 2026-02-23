@@ -74,4 +74,5 @@ execution:
     - LINKUSDT
     - AVAXUSDT
     - LTCUSDT
-  capital: 800
+  capital_multiplier: 2.0    # auto: balance x 2 (set to 0 to use fixed capital below)
+  capital: 800               # fixed capital (only used when capital_multiplier is 0)

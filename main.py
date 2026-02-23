@@ -172,7 +172,17 @@ def execute(ctx, method, min_sharpe, capital, frequency, confirm):
     config = ctx.obj['config']
     secrets = ctx.obj['secrets']
 
-    # 1. Generate signal
+    # 1. Auto capital: balance × multiplier
+    executor = HyperliquidExecutor(secrets)
+    if capital is None:
+        exec_cfg = config.get('execution', {})
+        multiplier = exec_cfg.get('capital_multiplier', 0)
+        if multiplier > 0:
+            balance = executor.get_account_value()
+            capital = round(balance * multiplier, 2)
+            console.print(f'[dim]Auto capital: ${balance:.0f} x {multiplier} = ${capital:.0f}[/dim]')
+
+    # 2. Generate signal
     gen = LiveSignalGenerator(config)
     result = gen.run(method=method, min_sharpe=min_sharpe,
                      frequency=frequency, capital=capital)
@@ -180,8 +190,7 @@ def execute(ctx, method, min_sharpe, capital, frequency, confirm):
         console.print('[red]No signal generated[/red]')
         return
 
-    # 2. Execute on Hyperliquid
-    executor = HyperliquidExecutor(secrets)
+    # 3. Execute on Hyperliquid
     executor.execute_signal(result['positions'], dry_run=not confirm)
 
 
