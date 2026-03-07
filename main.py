@@ -111,6 +111,45 @@ def report(ctx, top):
 
 
 @cli.command()
+@click.option('--min-sharpe', default=0.5, help='Minimum Sharpe to include')
+@click.option('--max-alphas', default=50, help='Max alphas to consider')
+@click.option('--frequency', default='1d', help='Frequency (default: 1d)')
+@click.option('--symbols', default='5,10,15', help='Comma-separated symbol counts to test')
+@click.option('--rebal', default='1,3,7', help='Comma-separated rebalance bar counts')
+@click.option('--methods', default='equal,sharpe', help='Comma-separated methods')
+@click.option('--corr-threshold', default=0.85, help='Correlation pruning threshold')
+@click.pass_context
+def grid(ctx, min_sharpe, max_alphas, frequency, symbols, rebal, methods, corr_threshold):
+    """Grid search for optimal portfolio parameters (symbols, rebalancing, method)."""
+    from src.backtest.grid import run_grid, print_grid_report
+    from src.config import get_db_path
+    from src.storage.database import Database
+
+    config = ctx.obj['config']
+    db = Database(get_db_path(config))
+
+    raw_alphas = db.get_top_alphas(min_sharpe=min_sharpe, limit=max_alphas)
+    raw_alphas = [a for a in raw_alphas if a['frequency'] == frequency]
+    console.print(f'Loaded {len(raw_alphas)} alphas (Sharpe >= {min_sharpe}, freq={frequency})')
+
+    sym_counts = [int(x) for x in symbols.split(',')]
+    rebal_bars = [int(x) for x in rebal.split(',')]
+    method_list = methods.split(',')
+
+    console.print(f'Grid: symbols={sym_counts} x rebal={rebal_bars} x methods={method_list}')
+    console.print(f'Total combinations: {len(sym_counts) * len(rebal_bars) * len(method_list)}')
+
+    df = run_grid(config, raw_alphas,
+                  symbol_counts=sym_counts,
+                  rebalance_bars_list=rebal_bars,
+                  methods=method_list,
+                  frequency=frequency,
+                  corr_threshold=corr_threshold)
+
+    print_grid_report(df, frequency)
+
+
+@cli.command()
 @click.option('--method', default='equal',
               type=click.Choice(['equal', 'sharpe', 'inverse_vol']),
               help='Weighting method for alpha combination')
