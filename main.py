@@ -117,9 +117,10 @@ def report(ctx, top):
 @click.option('--min-sharpe', default=0.5, help='Minimum Sharpe to include')
 @click.option('--max-alphas', default=20, help='Max number of alphas to combine')
 @click.option('--frequency', default='1d', help='Frequency (default: 1d)')
+@click.option('--corr-threshold', default=0.85, help='Correlation pruning threshold (default: 0.85)')
 @click.option('--all-methods', is_flag=True, help='Run all three weighting methods')
 @click.pass_context
-def combine(ctx, method, min_sharpe, max_alphas, frequency, all_methods):
+def combine(ctx, method, min_sharpe, max_alphas, frequency, corr_threshold, all_methods):
     """Combine top alphas into a portfolio and compare performance."""
     from src.orchestrator.combiner import AlphaCombiner
 
@@ -129,11 +130,11 @@ def combine(ctx, method, min_sharpe, max_alphas, frequency, all_methods):
     if all_methods:
         for m in ['equal', 'sharpe', 'inverse_vol']:
             console.print(f'\n{"="*60}')
-            result = combiner.run(m, min_sharpe, max_alphas, frequency)
+            result = combiner.run(m, min_sharpe, max_alphas, frequency, corr_threshold)
             if result.error:
                 console.print(f'[red]Error ({m}): {result.error}[/red]')
     else:
-        result = combiner.run(method, min_sharpe, max_alphas, frequency)
+        result = combiner.run(method, min_sharpe, max_alphas, frequency, corr_threshold)
         if result.error:
             console.print(f'[red]Error: {result.error}[/red]')
 
@@ -145,14 +146,42 @@ def combine(ctx, method, min_sharpe, max_alphas, frequency, all_methods):
 @click.option('--min-sharpe', default=0.5, help='Minimum Sharpe to include')
 @click.option('--capital', default=None, type=float, help='Capital amount (default: from config)')
 @click.option('--frequency', default='1d', help='Frequency (default: 1d)')
+@click.option('--corr-threshold', default=0.85, help='Correlation pruning threshold (default: 0.85)')
 @click.pass_context
-def signal(ctx, method, min_sharpe, capital, frequency):
+def signal(ctx, method, min_sharpe, capital, frequency, corr_threshold):
     """Generate live trading signal from combined alphas."""
     from src.orchestrator.signal import LiveSignalGenerator
 
     config = ctx.obj['config']
     gen = LiveSignalGenerator(config)
-    gen.run(method=method, min_sharpe=min_sharpe, frequency=frequency, capital=capital)
+    gen.run(method=method, min_sharpe=min_sharpe, frequency=frequency,
+            capital=capital, corr_threshold=corr_threshold)
+
+
+@cli.command()
+@click.option('--min-sharpe', default=0.5, help='Minimum Sharpe to include')
+@click.option('--max-alphas', default=100, help='Max alphas to analyze')
+@click.option('--frequency', default='1d', help='Frequency (default: 1d)')
+@click.option('--corr-threshold', default=0.85, help='Correlation threshold (default: 0.85)')
+@click.pass_context
+def prune(ctx, min_sharpe, max_alphas, frequency, corr_threshold):
+    """Analyze and prune correlated alphas."""
+    from src.alpha.pruner import prune_alphas, print_prune_report
+    from src.backtest.engine import Backtester
+    from src.config import get_db_path
+    from src.storage.database import Database
+
+    config = ctx.obj['config']
+    db = Database(get_db_path(config))
+    bt = Backtester(config)
+
+    raw_alphas = db.get_top_alphas(min_sharpe=min_sharpe, limit=max_alphas)
+    raw_alphas = [a for a in raw_alphas if a['frequency'] == frequency]
+    console.print(f'Loaded {len(raw_alphas)} alphas (Sharpe >= {min_sharpe}, freq={frequency})')
+
+    data = bt.load_data(frequency)
+    kept, removed = prune_alphas(raw_alphas, data, threshold=corr_threshold)
+    print_prune_report(kept, removed, corr_threshold)
 
 
 @cli.command()
@@ -162,9 +191,10 @@ def signal(ctx, method, min_sharpe, capital, frequency):
 @click.option('--min-sharpe', default=0.5, help='Minimum Sharpe to include')
 @click.option('--capital', default=None, type=float, help='Capital amount (default: from config)')
 @click.option('--frequency', default='1d', help='Frequency (default: 1d)')
+@click.option('--corr-threshold', default=0.85, help='Correlation pruning threshold (default: 0.85)')
 @click.option('--confirm', is_flag=True, help='Actually execute orders (default: dry run)')
 @click.pass_context
-def execute(ctx, method, min_sharpe, capital, frequency, confirm):
+def execute(ctx, method, min_sharpe, capital, frequency, corr_threshold, confirm):
     """Generate signal and execute on Hyperliquid (dry run by default)."""
     from src.orchestrator.signal import LiveSignalGenerator
     from src.execution.hyperliquid import HyperliquidExecutor
@@ -185,7 +215,8 @@ def execute(ctx, method, min_sharpe, capital, frequency, confirm):
     # 2. Generate signal
     gen = LiveSignalGenerator(config)
     result = gen.run(method=method, min_sharpe=min_sharpe,
-                     frequency=frequency, capital=capital)
+                     frequency=frequency, capital=capital,
+                     corr_threshold=corr_threshold)
     if not result:
         console.print('[red]No signal generated[/red]')
         return

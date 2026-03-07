@@ -14,6 +14,7 @@ from rich.console import Console
 from rich.table import Table
 
 from src.alpha.evaluator import AlphaEvaluator, EvaluationError
+from src.alpha.pruner import prune_alphas
 from src.backtest.engine import Backtester
 from src.backtest.position import normalize_positions
 from src.config import get_db_path
@@ -98,13 +99,14 @@ class LiveSignalGenerator:
 
     def run(self, method: str = 'sharpe', min_sharpe: float = 0.5,
             max_alphas: int = 20, frequency: str = '1d',
-            capital: float | None = None) -> dict | None:
+            capital: float | None = None,
+            corr_threshold: float = 0.85) -> dict | None:
         """Generate today's live trading signal."""
         exec_cfg = self.config.get('execution', {})
         capital = capital or exec_cfg.get('capital', self.bt_cfg.get('capital', 10000))
 
         # 1. Query good alphas
-        raw_alphas = self.db.get_top_alphas(min_sharpe=min_sharpe, limit=max_alphas)
+        raw_alphas = self.db.get_top_alphas(min_sharpe=min_sharpe, limit=max_alphas * 3)
         raw_alphas = [a for a in raw_alphas if a['frequency'] == frequency]
         if not raw_alphas:
             console.print('[red]No alphas found in DB[/red]')
@@ -116,6 +118,16 @@ class LiveSignalGenerator:
         if not data:
             console.print('[red]No data available[/red]')
             return None
+
+        # 2b. Correlation pruning
+        if corr_threshold < 1.0:
+            console.print(f'Pruning correlated alphas (threshold={corr_threshold})...')
+            kept, removed = prune_alphas(raw_alphas, data, threshold=corr_threshold)
+            console.print(f'  {len(raw_alphas)} -> {len(kept)} alphas ({len(removed)} redundant removed)')
+            raw_alphas = kept[:max_alphas]
+            if not raw_alphas:
+                console.print('[red]No alphas left after pruning[/red]')
+                return None
 
         # 3. Evaluate each alpha, compute weights, combine
         evaluator = AlphaEvaluator(data)

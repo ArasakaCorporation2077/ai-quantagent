@@ -13,6 +13,7 @@ from rich.console import Console
 from rich.table import Table
 
 from src.alpha.evaluator import AlphaEvaluator, EvaluationError
+from src.alpha.pruner import prune_alphas, print_prune_report
 from src.backtest.engine import Backtester, BacktestResult, _oos_mask
 from src.backtest.metrics import compute_all_metrics
 from src.backtest.position import normalize_positions, compute_forward_returns, apply_transaction_costs
@@ -51,11 +52,12 @@ class AlphaCombiner:
         self.db = Database(get_db_path(config))
 
     def run(self, method: str = 'equal', min_sharpe: float = 0.5,
-            max_alphas: int = 20, frequency: str = '1d') -> CombineResult:
+            max_alphas: int = 20, frequency: str = '1d',
+            corr_threshold: float = 0.85) -> CombineResult:
         """Full combination pipeline."""
 
         # 1. Query good alphas
-        raw_alphas = self.db.get_top_alphas(min_sharpe=min_sharpe, limit=max_alphas)
+        raw_alphas = self.db.get_top_alphas(min_sharpe=min_sharpe, limit=max_alphas * 3)
         raw_alphas = [a for a in raw_alphas if a['frequency'] == frequency]
 
         if len(raw_alphas) < 2:
@@ -64,8 +66,18 @@ class AlphaCombiner:
 
         console.print(f'Found {len(raw_alphas)} alphas with Sharpe >= {min_sharpe}')
 
-        # 2. Load data once, compute each alpha's signal
+        # 2. Load data once
         data = self.backtester.load_data(frequency)
+
+        # 2b. Correlation pruning
+        if corr_threshold < 1.0:
+            console.print(f'Running correlation pruning (threshold={corr_threshold})...')
+            kept, removed = prune_alphas(raw_alphas, data, threshold=corr_threshold)
+            print_prune_report(kept, removed, corr_threshold)
+            raw_alphas = kept[:max_alphas]
+            if len(raw_alphas) < 2:
+                return CombineResult(method=method,
+                                     error=f'After pruning only {len(raw_alphas)} alphas remain')
         evaluator = AlphaEvaluator(data)
 
         capital = self.bt_cfg.get('capital', 10000)
