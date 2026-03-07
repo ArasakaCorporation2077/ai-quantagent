@@ -17,10 +17,17 @@ class Database:
         self._init_db()
 
     def _init_db(self):
-        """Create tables if they don't exist."""
+        """Create tables if they don't exist, and run migrations."""
         with self._conn() as conn:
             for name, ddl in TABLES.items():
                 conn.execute(ddl)
+            # Migration: add OOS columns if missing
+            cols = [r[1] for r in conn.execute('PRAGMA table_info(backtest_results)').fetchall()]
+            if 'sharpe_oos' not in cols:
+                conn.execute('ALTER TABLE backtest_results ADD COLUMN sharpe_oos REAL')
+                conn.execute('ALTER TABLE backtest_results ADD COLUMN sharpe_is REAL')
+                conn.execute('ALTER TABLE backtest_results ADD COLUMN n_oos INTEGER')
+                conn.execute('ALTER TABLE backtest_results ADD COLUMN n_is INTEGER')
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -58,14 +65,14 @@ class Database:
             conn.execute('UPDATE alphas SET is_valid = 0 WHERE id = ?', (alpha_id,))
 
     def save_backtest_result(self, alpha_id: int, metrics: dict) -> int:
-        """Save backtest results for an alpha."""
+        """Save backtest results for an alpha (including OOS metrics)."""
         with self._conn() as conn:
             cur = conn.execute(
                 '''INSERT INTO backtest_results
                    (alpha_id, sharpe_ratio, sortino_ratio, annualized_return,
                     max_drawdown, calmar_ratio, win_rate, profit_factor,
-                    total_return, num_periods)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                    total_return, num_periods, sharpe_oos, sharpe_is, n_oos, n_is)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                 (alpha_id,
                  metrics.get('sharpe_ratio'),
                  metrics.get('sortino_ratio'),
@@ -75,22 +82,28 @@ class Database:
                  metrics.get('win_rate'),
                  metrics.get('profit_factor'),
                  metrics.get('total_return'),
-                 metrics.get('num_periods'))
+                 metrics.get('num_periods'),
+                 metrics.get('sharpe_oos'),
+                 metrics.get('sharpe_is'),
+                 metrics.get('n_oos'),
+                 metrics.get('n_is'))
             )
             return cur.lastrowid
 
     def get_top_alphas(self, min_sharpe: float = 0, limit: int = 20) -> list[dict]:
-        """Get top-performing alphas by Sharpe ratio."""
+        """Get top-performing alphas by Sharpe ratio (deduplicated per alpha)."""
         with self._conn() as conn:
             rows = conn.execute(
                 '''SELECT a.expression, a.frequency, s.strategy_text, s.category,
-                          b.sharpe_ratio, b.sortino_ratio, b.annualized_return,
-                          b.max_drawdown, b.total_return, b.win_rate
+                          MAX(b.sharpe_ratio) as sharpe_ratio, b.sortino_ratio,
+                          b.annualized_return, b.max_drawdown, b.total_return,
+                          b.win_rate
                    FROM backtest_results b
                    JOIN alphas a ON b.alpha_id = a.id
                    JOIN strategies s ON a.strategy_id = s.id
                    WHERE b.sharpe_ratio >= ? AND a.is_valid = 1
-                   ORDER BY b.sharpe_ratio DESC
+                   GROUP BY a.id
+                   ORDER BY sharpe_ratio DESC
                    LIMIT ?''',
                 (min_sharpe, limit)
             ).fetchall()

@@ -105,7 +105,7 @@ class AlphaEvaluator:
             # Convert number args
             args = []
             for i, (val, expected) in enumerate(zip(raw_args, arg_types)):
-                if expected == 'number':
+                if expected in ('number', 'float_opt'):
                     if isinstance(val, pd.Series):
                         raise EvaluationError(
                             f'{node.name} arg {i} should be a number, got series'

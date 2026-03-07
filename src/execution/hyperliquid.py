@@ -61,25 +61,29 @@ class HyperliquidExecutor:
         secret_key = hl_cfg.get('secret_key', '')
 
         if not self.account_address or not secret_key:
-            raise ValueError('Hyperliquid credentials not found in secrets.yaml')
+            raise ValueError('Hyperliquid credentials not found. Set HYPERLIQUID_ACCOUNT_ADDRESS and HYPERLIQUID_SECRET_KEY in .env')
 
         self.wallet = Account.from_key(secret_key)
         self.exchange = Exchange(self.wallet, constants.MAINNET_API_URL)
         self.info = Info(constants.MAINNET_API_URL, skip_ws=True)
 
     def get_positions(self) -> dict[str, float]:
-        """Get current positions as {coin: size_usd}. Positive=long, negative=short."""
+        """Get current positions as {coin: size_usd}. Positive=long, negative=short.
+        Uses current mid price (not entry price) for accurate exposure calculation.
+        """
         state = self.info.user_state(self.account_address)
+        all_mids = self.info.all_mids()
         positions = {}
 
         for asset_pos in state.get('assetPositions', []):
             pos = asset_pos.get('position', {})
             coin = pos.get('coin', '')
             szi = float(pos.get('szi', 0))
-            entry_px = float(pos.get('entryPx', 0)) if pos.get('entryPx') else 0
 
-            if szi != 0 and entry_px > 0:
-                positions[coin] = szi * entry_px  # USD notional
+            if szi != 0:
+                mid_price = float(all_mids.get(coin, 0))
+                if mid_price > 0:
+                    positions[coin] = szi * mid_price
 
         return positions
 

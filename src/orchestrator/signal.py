@@ -66,6 +66,15 @@ def _fetch_recent_klines(symbol: str, interval: str, limit: int = 100) -> pd.Dat
 
     df = df.set_index('open_time').sort_index()
 
+    # Drop the last row if it's an unclosed candle (close_time in the future)
+    if len(df) > 0:
+        last_close_time = pd.to_datetime(float(df['close_time'].iloc[-1]), unit='ms')
+        if last_close_time > pd.Timestamp.utcnow():
+            df = df.iloc[:-1]
+
+    if len(df) == 0:
+        return None
+
     # Compute derived fields (same as processor.py)
     df['total_volume'] = df['volume']
     df['buy_volume'] = df['taker_buy_base_asset_volume']

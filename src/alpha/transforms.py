@@ -288,7 +288,7 @@ TRANSFORM_REGISTRY = {
     'min':           (min_,           ['series', 'series'],                        'elementwise'),
     # Cross-sectional
     'rank':          (rank_,          ['series'],                                  'crosssectional'),
-    'scale':         (scale_,         ['series'],                                  'crosssectional'),
+    'scale':         (scale_,         ['series', 'float_opt'],                           'crosssectional'),
     # Time-series
     'delay':         (delay,          ['series', 'number'],                        'timeseries'),
     'delta':         (delta,          ['series', 'number'],                        'timeseries'),

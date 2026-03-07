@@ -54,16 +54,18 @@ class Backtester:
         self.lookahead = self.bt_cfg.get('lookahead', 1)
         self.capital = self.bt_cfg.get('capital', 10000)
         self.sampling = self.bt_cfg.get('sampling', 'quarterly')
-        self._data_cache: dict[str, dict[str, pd.DataFrame]] = {}
+        self._data_cache: dict[tuple, dict[str, pd.DataFrame]] = {}
 
     def load_data(self, frequency: str, symbols: list[str] | None = None) -> dict[str, pd.DataFrame]:
         """Load processed parquet data for all symbols at a given frequency."""
-        if frequency in self._data_cache:
-            return self._data_cache[frequency]
-
-        data_dir = get_data_dir(self.config) / 'processed'
         if symbols is None:
             symbols = self.config['symbols']
+
+        cache_key = (frequency, tuple(sorted(symbols)))
+        if cache_key in self._data_cache:
+            return self._data_cache[cache_key]
+
+        data_dir = get_data_dir(self.config) / 'processed'
 
         data = {}
         for sym in symbols:
@@ -76,7 +78,7 @@ class Backtester:
             else:
                 logger.warning(f'No data file: {path}')
 
-        self._data_cache[frequency] = data
+        self._data_cache[cache_key] = data
         return data
 
     def run(self, expression: str, frequency: str,
