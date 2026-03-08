@@ -3,6 +3,8 @@ db/*.db-journal
 logs/
 config/secrets.yaml
 .env
+SESSION_HANDOFF.txt
+*_HANDOFF.txt
 __pycache__/
 src/llm/
 src/orchestrator/pipeline.py
