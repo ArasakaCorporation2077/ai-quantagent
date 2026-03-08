@@ -19,6 +19,7 @@ from src.backtest.engine import Backtester
 from src.backtest.position import normalize_positions
 from src.config import get_db_path
 from src.data.schema import PROCESSED_COLUMNS
+from src.orchestrator.scoring import compute_oos_score
 from src.storage.database import Database
 
 logger = logging.getLogger(__name__)
@@ -69,8 +70,8 @@ def _fetch_recent_klines(symbol: str, interval: str, limit: int = 100) -> pd.Dat
 
     # Drop the last row if it's an unclosed candle (close_time in the future)
     if len(df) > 0:
-        last_close_time = pd.to_datetime(float(df['close_time'].iloc[-1]), unit='ms')
-        if last_close_time > pd.Timestamp.utcnow():
+        last_close_time = pd.to_datetime(float(df['close_time'].iloc[-1]), unit='ms', utc=True)
+        if last_close_time > pd.Timestamp.now(tz='UTC'):
             df = df.iloc[:-1]
 
     if len(df) == 0:
@@ -97,21 +98,53 @@ class LiveSignalGenerator:
         self.backtester = Backtester(config)
         self.db = Database(get_db_path(config))
 
-    def run(self, method: str = 'sharpe', min_sharpe: float = 0.5,
+    def run(self, method: str = 'sharpe', min_sharpe: float | None = None,
+            min_sharpe_oos: float = 0.5, min_n_oos: int = 60,
             max_alphas: int = 20, frequency: str = '1d',
             capital: float | None = None,
-            corr_threshold: float = 0.85) -> dict | None:
+            corr_threshold: float = 0.85,
+            target_n_oos: int = 60) -> dict | None:
         """Generate today's live trading signal."""
         exec_cfg = self.config.get('execution', {})
         capital = capital or exec_cfg.get('capital', self.bt_cfg.get('capital', 10000))
 
         # 1. Query good alphas
-        raw_alphas = self.db.get_top_alphas(min_sharpe=min_sharpe, limit=max_alphas * 3)
+        raw_alphas = self.db.get_top_alphas(
+            min_sharpe=min_sharpe,
+            min_sharpe_oos=min_sharpe_oos,
+            min_n_oos=min_n_oos,
+            ranking_metric='sharpe_oos',
+            limit=max_alphas * 3,
+        )
         raw_alphas = [a for a in raw_alphas if a['frequency'] == frequency]
-        if not raw_alphas:
-            console.print('[red]No alphas found in DB[/red]')
-            return None
-        console.print(f'Loaded {len(raw_alphas)} alphas (Sharpe >= {min_sharpe})')
+        if raw_alphas:
+            console.print(
+                f'Loaded {len(raw_alphas)} alphas '
+                f'(OOS Sharpe >= {min_sharpe_oos}, n_oos >= {min_n_oos}, freq={frequency})'
+            )
+        else:
+            missing_for_freq = self.db.get_backtests_missing_oos(frequency=frequency, limit=1)
+            if missing_for_freq:
+                fallback_min_sharpe = min_sharpe if min_sharpe is not None else min_sharpe_oos
+                console.print(
+                    '[yellow]No OOS-ranked alphas found for this frequency. '
+                    'Falling back to full-sample Sharpe ranking.[/yellow]'
+                )
+                raw_alphas = self.db.get_top_alphas(
+                    min_sharpe=fallback_min_sharpe,
+                    ranking_metric='sharpe',
+                    limit=max_alphas * 3,
+                )
+                raw_alphas = [a for a in raw_alphas if a['frequency'] == frequency]
+
+            if not raw_alphas:
+                console.print('[red]No alphas found in DB[/red]')
+                return None
+
+            console.print(
+                f'Loaded {len(raw_alphas)} fallback alphas '
+                f'(full-sample Sharpe >= {fallback_min_sharpe}, freq={frequency})'
+            )
 
         # 2. Load historical data + fetch latest from Binance API
         data = self._load_updated_data(frequency)
@@ -139,6 +172,8 @@ class LiveSignalGenerator:
                 alpha_records.append({
                     'expression': a['expression'],
                     'sharpe_ratio': a['sharpe_ratio'],
+                    'sharpe_oos': a.get('sharpe_oos') or 0.0,
+                    'n_oos': a.get('n_oos') or 0,
                     'signal': signal,
                 })
             except (EvaluationError, Exception) as e:
@@ -149,7 +184,7 @@ class LiveSignalGenerator:
             return None
 
         # 4. Compute weights
-        weights = self._compute_weights(alpha_records, method)
+        weights = self._compute_weights(alpha_records, method, target_n_oos)
 
         # 5. Combine signals (cross-sectional z-score + weighted sum)
         combined = self._combine_signals(alpha_records, weights)
@@ -205,16 +240,24 @@ class LiveSignalGenerator:
 
         return updated
 
-    def _compute_weights(self, alphas: list[dict], method: str) -> list[float]:
+    def _compute_weights(
+        self,
+        alphas: list[dict],
+        method: str,
+        target_n_oos: int,
+    ) -> list[float]:
         n = len(alphas)
         if method == 'equal':
             return [1.0 / n] * n
         elif method == 'sharpe':
-            sharpes = [max(a['sharpe_ratio'], 0) for a in alphas]
-            total = sum(sharpes)
+            scores = [
+                compute_oos_score(a.get('sharpe_oos'), a.get('n_oos'), target_n_oos)
+                for a in alphas
+            ]
+            total = sum(scores)
             if total == 0:
                 return [1.0 / n] * n
-            return [s / total for s in sharpes]
+            return [score / total for score in scores]
         elif method == 'inverse_vol':
             # Fallback to equal if no vol data available in signal-only mode
             return [1.0 / n] * n

@@ -18,6 +18,7 @@ from src.backtest.engine import Backtester, BacktestResult, _oos_mask
 from src.backtest.metrics import compute_all_metrics
 from src.backtest.position import normalize_positions, compute_forward_returns, apply_transaction_costs
 from src.config import get_db_path
+from src.orchestrator.scoring import compute_oos_score
 from src.storage.database import Database
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,8 @@ class AlphaRecord:
     expression: str
     frequency: str
     sharpe_ratio: float
+    sharpe_oos: float = 0.0
+    n_oos: int = 0
     signal: pd.DataFrame | None = None
     pnl_std: float = 0.0
 
@@ -51,20 +54,30 @@ class AlphaCombiner:
         self.backtester = Backtester(config)
         self.db = Database(get_db_path(config))
 
-    def run(self, method: str = 'equal', min_sharpe: float = 0.5,
+    def run(self, method: str = 'equal', min_sharpe: float | None = None,
+            min_sharpe_oos: float = 0.5, min_n_oos: int = 60,
             max_alphas: int = 20, frequency: str = '1d',
-            corr_threshold: float = 0.85) -> CombineResult:
+            corr_threshold: float = 0.85, target_n_oos: int = 60) -> CombineResult:
         """Full combination pipeline."""
 
         # 1. Query good alphas
-        raw_alphas = self.db.get_top_alphas(min_sharpe=min_sharpe, limit=max_alphas * 3)
+        raw_alphas = self.db.get_top_alphas(
+            min_sharpe=min_sharpe,
+            min_sharpe_oos=min_sharpe_oos,
+            min_n_oos=min_n_oos,
+            ranking_metric='sharpe_oos',
+            limit=max_alphas * 3,
+        )
         raw_alphas = [a for a in raw_alphas if a['frequency'] == frequency]
 
         if len(raw_alphas) < 2:
             return CombineResult(method=method,
                                  error=f'Need at least 2 alphas, found {len(raw_alphas)}')
 
-        console.print(f'Found {len(raw_alphas)} alphas with Sharpe >= {min_sharpe}')
+        console.print(
+            f'Found {len(raw_alphas)} alphas '
+            f'(OOS Sharpe >= {min_sharpe_oos}, n_oos >= {min_n_oos}, freq={frequency})'
+        )
 
         # 2. Load data once
         data = self.backtester.load_data(frequency)
@@ -96,6 +109,8 @@ class AlphaCombiner:
                     expression=a['expression'],
                     frequency=a['frequency'],
                     sharpe_ratio=a['sharpe_ratio'],
+                    sharpe_oos=a.get('sharpe_oos') or 0.0,
+                    n_oos=a.get('n_oos') or 0,
                     signal=signal,
                 )
 
@@ -125,7 +140,7 @@ class AlphaCombiner:
                                  error=f'Only {len(alpha_records)} alphas evaluated successfully')
 
         # 3. Compute weights
-        weights = self._compute_weights(alpha_records, method)
+        weights = self._compute_weights(alpha_records, method, target_n_oos)
 
         # 4. Combine signals
         combined_signal = self._combine_signals(alpha_records, weights)
@@ -151,17 +166,29 @@ class AlphaCombiner:
 
         return result
 
-    def _compute_weights(self, alphas: list[AlphaRecord], method: str) -> dict:
+    def _compute_weights(
+        self,
+        alphas: list[AlphaRecord],
+        method: str,
+        target_n_oos: int,
+    ) -> dict:
         n = len(alphas)
 
         if method == 'equal':
             return {a.expression: 1.0 / n for a in alphas}
 
         elif method == 'sharpe':
-            total = sum(max(a.sharpe_ratio, 0) for a in alphas)
+            scores = [
+                compute_oos_score(a.sharpe_oos, a.n_oos, target_n_oos)
+                for a in alphas
+            ]
+            total = sum(scores)
             if total == 0:
                 return {a.expression: 1.0 / n for a in alphas}
-            return {a.expression: max(a.sharpe_ratio, 0) / total for a in alphas}
+            return {
+                a.expression: score / total
+                for a, score in zip(alphas, scores)
+            }
 
         elif method == 'inverse_vol':
             inv_vols = [1.0 / a.pnl_std if a.pnl_std > 0 else 0.0 for a in alphas]
@@ -252,11 +279,15 @@ class AlphaCombiner:
         wt.add_column('#', style='dim')
         wt.add_column('Expression', max_width=65)
         wt.add_column('Weight', style='green')
+        wt.add_column('OOS Sharpe', style='magenta')
+        wt.add_column('n_oos', style='yellow')
         wt.add_column('Sharpe', style='cyan')
         for i, a in enumerate(alpha_records, 1):
             expr = a.expression[:60] + '...' if len(a.expression) > 60 else a.expression
             wt.add_row(str(i), expr,
                         f'{result.weights[a.expression]:.3f}',
+                        f'{a.sharpe_oos:.2f}',
+                        str(a.n_oos),
                         f'{a.sharpe_ratio:.2f}')
         console.print(wt)
         console.print()

@@ -97,29 +97,104 @@ def pipeline(ctx, iterations):
 
 @cli.command()
 @click.option('--top', default=20, help='Number of top alphas to show')
+@click.option('--min-sharpe', default=None, type=float,
+              help='Optional minimum full-sample Sharpe to include')
+@click.option('--min-sharpe-oos', default=0.5, help='Minimum OOS Sharpe to include')
+@click.option('--min-n-oos', default=60, help='Minimum OOS bar count to include')
+@click.option('--ranking-metric', default='sharpe_oos',
+              type=click.Choice(['sharpe_oos', 'sharpe', 'sharpe_is']),
+              help='Ranking metric for selecting top alphas')
 @click.pass_context
-def report(ctx, top):
-    """Show top discovered alphas from the database."""
+def report(ctx, top, min_sharpe, min_sharpe_oos, min_n_oos, ranking_metric):
+    """Show top discovered alphas from the database (OOS-first by default)."""
     from src.storage.database import Database
     from src.config import get_db_path
 
     config = ctx.obj['config']
     db = Database(get_db_path(config))
-    alphas = db.get_top_alphas(limit=top)
+    alphas = db.get_top_alphas(
+        min_sharpe=min_sharpe,
+        min_sharpe_oos=min_sharpe_oos,
+        min_n_oos=min_n_oos,
+        ranking_metric=ranking_metric,
+        limit=top,
+    )
+    if not alphas and db.count_backtests_missing_oos() > 0:
+        console.print(
+            '[yellow]No OOS-ranked alphas available yet. '
+            'Run `python main.py backfill-oos` first.[/yellow]'
+        )
+        return
     for a in alphas:
         console.print(a)
 
 
+@cli.command(name='backfill-oos')
+@click.option('--frequency', default=None,
+              type=click.Choice(['1h', '4h', '12h', '1d']),
+              help='Only backfill one frequency')
+@click.option('--limit', default=None, type=int, help='Optional max rows to backfill')
+@click.pass_context
+def backfill_oos(ctx, frequency, limit):
+    """Backfill missing IS/OOS metrics for older backtest rows."""
+    from rich.progress import track
+
+    from src.backtest.engine import Backtester
+    from src.storage.database import Database
+    from src.config import get_db_path
+
+    config = ctx.obj['config']
+    db = Database(get_db_path(config))
+    bt = Backtester(config)
+
+    rows = db.get_backtests_missing_oos(frequency=frequency, limit=limit)
+    if not rows:
+        console.print('[green]No backtests need OOS backfill.[/green]')
+        return
+
+    console.print(f'Backfilling {len(rows)} backtests...')
+    data_cache = {}
+    result_cache = {}
+    updated = 0
+    failed = 0
+
+    for row in track(rows, description='Backfilling OOS metrics...'):
+        freq = row['frequency']
+        cache_key = (row['expression'], freq)
+
+        if cache_key not in result_cache:
+            data = data_cache.setdefault(freq, bt.load_data(freq))
+            result_cache[cache_key] = bt.run(row['expression'], freq, data=data)
+
+        result = result_cache[cache_key]
+        if result.error:
+            failed += 1
+            continue
+
+        db.update_backtest_oos_metrics(row['backtest_result_id'], result.metrics)
+        updated += 1
+
+    console.print(f'[green]Updated {updated} backtests[/green]')
+    if failed:
+        console.print(f'[red]Failed to recompute {failed} backtests[/red]')
+
+
 @cli.command(name='half-life')
-@click.option('--min-sharpe', default=0.5, help='Minimum Sharpe to include')
+@click.option('--min-sharpe', default=None, type=float,
+              help='Optional minimum full-sample Sharpe to include')
+@click.option('--min-sharpe-oos', default=0.5, help='Minimum OOS Sharpe to include')
+@click.option('--min-n-oos', default=60, help='Minimum OOS bar count to include')
 @click.option('--max-alphas', default=20, help='Max alphas to analyze')
 @click.option('--frequency', default='1d', help='Frequency (default: 1d)')
 @click.option('--max-lag', default=10, help='Maximum forward lag to test')
 @click.option('--combined', is_flag=True, help='Analyze combined signal instead of individual')
 @click.option('--method', default='sharpe', type=click.Choice(['equal', 'sharpe']),
-              help='Weighting method for combined analysis')
+              help='Weighting method for combined analysis (sharpe = OOS Sharpe weighted)')
+@click.option('--target-n-oos', default=60,
+              help='OOS bar count where Sharpe weighting reaches full strength')
 @click.pass_context
-def half_life(ctx, min_sharpe, max_alphas, frequency, max_lag, combined, method):
+def half_life(ctx, min_sharpe, min_sharpe_oos, min_n_oos, max_alphas,
+              frequency, max_lag, combined, method, target_n_oos):
     """Analyze alpha signal half-life (IC and spread decay)."""
     from src.alpha.analytics import (
         analyze_alpha_halflife, analyze_combined_halflife, print_halflife_report
@@ -132,14 +207,36 @@ def half_life(ctx, min_sharpe, max_alphas, frequency, max_lag, combined, method)
     db = Database(get_db_path(config))
     bt = Backtester(config)
 
-    raw_alphas = db.get_top_alphas(min_sharpe=min_sharpe, limit=max_alphas)
+    raw_alphas = db.get_top_alphas(
+        min_sharpe=min_sharpe,
+        min_sharpe_oos=min_sharpe_oos,
+        min_n_oos=min_n_oos,
+        ranking_metric='sharpe_oos',
+        limit=max_alphas,
+    )
     raw_alphas = [a for a in raw_alphas if a['frequency'] == frequency]
-    console.print(f'Loaded {len(raw_alphas)} alphas (Sharpe >= {min_sharpe}, freq={frequency})')
+    if not raw_alphas and db.count_backtests_missing_oos() > 0:
+        console.print(
+            '[yellow]No OOS-ranked alphas available yet. '
+            'Run `python main.py backfill-oos` first.[/yellow]'
+        )
+        return
+
+    console.print(
+        f'Loaded {len(raw_alphas)} alphas '
+        f'(OOS Sharpe >= {min_sharpe_oos}, n_oos >= {min_n_oos}, freq={frequency})'
+    )
 
     data = bt.load_data(frequency)
 
     if combined:
-        result = analyze_combined_halflife(raw_alphas, data, max_lag, method)
+        result = analyze_combined_halflife(
+            raw_alphas,
+            data,
+            max_lag=max_lag,
+            method=method,
+            target_n_oos=target_n_oos,
+        )
         print_halflife_report(result)
     else:
         for a in raw_alphas[:5]:
@@ -192,15 +289,21 @@ def grid(ctx, min_sharpe, max_alphas, frequency, symbols, rebal, methods, corr_t
 @cli.command()
 @click.option('--method', default='equal',
               type=click.Choice(['equal', 'sharpe', 'inverse_vol']),
-              help='Weighting method for alpha combination')
-@click.option('--min-sharpe', default=0.5, help='Minimum Sharpe to include')
+              help='Weighting method for alpha combination (sharpe = OOS Sharpe weighted)')
+@click.option('--min-sharpe', default=None, type=float,
+              help='Optional minimum full-sample Sharpe to include')
+@click.option('--min-sharpe-oos', default=0.5, help='Minimum OOS Sharpe to include')
+@click.option('--min-n-oos', default=60, help='Minimum OOS bar count to include')
+@click.option('--target-n-oos', default=60,
+              help='OOS bar count where Sharpe weighting reaches full strength')
 @click.option('--max-alphas', default=20, help='Max number of alphas to combine')
 @click.option('--frequency', default='1d', help='Frequency (default: 1d)')
 @click.option('--corr-threshold', default=0.85, help='Correlation pruning threshold (default: 0.85)')
 @click.option('--all-methods', is_flag=True, help='Run all three weighting methods')
 @click.pass_context
-def combine(ctx, method, min_sharpe, max_alphas, frequency, corr_threshold, all_methods):
-    """Combine top alphas into a portfolio and compare performance."""
+def combine(ctx, method, min_sharpe, min_sharpe_oos, min_n_oos, target_n_oos,
+            max_alphas, frequency, corr_threshold, all_methods):
+    """Combine top alphas into a portfolio using OOS-first selection."""
     from src.orchestrator.combiner import AlphaCombiner
 
     config = ctx.obj['config']
@@ -209,11 +312,29 @@ def combine(ctx, method, min_sharpe, max_alphas, frequency, corr_threshold, all_
     if all_methods:
         for m in ['equal', 'sharpe', 'inverse_vol']:
             console.print(f'\n{"="*60}')
-            result = combiner.run(m, min_sharpe, max_alphas, frequency, corr_threshold)
+            result = combiner.run(
+                method=m,
+                min_sharpe=min_sharpe,
+                min_sharpe_oos=min_sharpe_oos,
+                min_n_oos=min_n_oos,
+                max_alphas=max_alphas,
+                frequency=frequency,
+                corr_threshold=corr_threshold,
+                target_n_oos=target_n_oos,
+            )
             if result.error:
                 console.print(f'[red]Error ({m}): {result.error}[/red]')
     else:
-        result = combiner.run(method, min_sharpe, max_alphas, frequency, corr_threshold)
+        result = combiner.run(
+            method=method,
+            min_sharpe=min_sharpe,
+            min_sharpe_oos=min_sharpe_oos,
+            min_n_oos=min_n_oos,
+            max_alphas=max_alphas,
+            frequency=frequency,
+            corr_threshold=corr_threshold,
+            target_n_oos=target_n_oos,
+        )
         if result.error:
             console.print(f'[red]Error: {result.error}[/red]')
 
@@ -221,20 +342,43 @@ def combine(ctx, method, min_sharpe, max_alphas, frequency, corr_threshold, all_
 @cli.command()
 @click.option('--method', default='sharpe',
               type=click.Choice(['equal', 'sharpe']),
-              help='Weighting method (default: sharpe)')
-@click.option('--min-sharpe', default=0.5, help='Minimum Sharpe to include')
+              help='Weighting method (default: sharpe = OOS Sharpe weighted)')
+@click.option('--min-sharpe', default=None, type=float,
+              help='Optional minimum full-sample Sharpe to include')
+@click.option('--min-sharpe-oos', default=0.5, help='Minimum OOS Sharpe to include')
+@click.option('--min-n-oos', default=60, help='Minimum OOS bar count to include')
+@click.option('--target-n-oos', default=60,
+              help='OOS bar count where Sharpe weighting reaches full strength')
 @click.option('--capital', default=None, type=float, help='Capital amount (default: from config)')
 @click.option('--frequency', default='1d', help='Frequency (default: 1d)')
 @click.option('--corr-threshold', default=0.85, help='Correlation pruning threshold (default: 0.85)')
 @click.pass_context
-def signal(ctx, method, min_sharpe, capital, frequency, corr_threshold):
-    """Generate live trading signal from combined alphas."""
+def signal(ctx, method, min_sharpe, min_sharpe_oos, min_n_oos, target_n_oos,
+           capital, frequency, corr_threshold):
+    """Generate a live trading signal from OOS-selected alphas."""
     from src.orchestrator.signal import LiveSignalGenerator
 
     config = ctx.obj['config']
     gen = LiveSignalGenerator(config)
-    gen.run(method=method, min_sharpe=min_sharpe, frequency=frequency,
-            capital=capital, corr_threshold=corr_threshold)
+    result = gen.run(
+        method=method,
+        min_sharpe=min_sharpe,
+        min_sharpe_oos=min_sharpe_oos,
+        min_n_oos=min_n_oos,
+        frequency=frequency,
+        capital=capital,
+        corr_threshold=corr_threshold,
+        target_n_oos=target_n_oos,
+    )
+    if not result:
+        from src.storage.database import Database
+        from src.config import get_db_path
+
+        db = Database(get_db_path(config))
+        if db.count_backtests_missing_oos() > 0:
+            console.print(
+                '[yellow]Hint: run `python main.py backfill-oos` to populate OOS metrics.[/yellow]'
+            )
 
 
 @cli.command()
@@ -266,15 +410,21 @@ def prune(ctx, min_sharpe, max_alphas, frequency, corr_threshold):
 @cli.command()
 @click.option('--method', default='sharpe',
               type=click.Choice(['equal', 'sharpe']),
-              help='Weighting method (default: sharpe)')
-@click.option('--min-sharpe', default=0.5, help='Minimum Sharpe to include')
+              help='Weighting method (default: sharpe = OOS Sharpe weighted)')
+@click.option('--min-sharpe', default=None, type=float,
+              help='Optional minimum full-sample Sharpe to include')
+@click.option('--min-sharpe-oos', default=0.5, help='Minimum OOS Sharpe to include')
+@click.option('--min-n-oos', default=60, help='Minimum OOS bar count to include')
+@click.option('--target-n-oos', default=60,
+              help='OOS bar count where Sharpe weighting reaches full strength')
 @click.option('--capital', default=None, type=float, help='Capital amount (default: from config)')
 @click.option('--frequency', default='1d', help='Frequency (default: 1d)')
 @click.option('--corr-threshold', default=0.85, help='Correlation pruning threshold (default: 0.85)')
 @click.option('--confirm', is_flag=True, help='Actually execute orders (default: dry run)')
 @click.pass_context
-def execute(ctx, method, min_sharpe, capital, frequency, corr_threshold, confirm):
-    """Generate signal and execute on Hyperliquid (dry run by default)."""
+def execute(ctx, method, min_sharpe, min_sharpe_oos, min_n_oos, target_n_oos,
+            capital, frequency, corr_threshold, confirm):
+    """Generate a signal from OOS-selected alphas and execute it on Hyperliquid."""
     from src.orchestrator.signal import LiveSignalGenerator
     from src.execution.hyperliquid import HyperliquidExecutor
 
@@ -293,9 +443,16 @@ def execute(ctx, method, min_sharpe, capital, frequency, corr_threshold, confirm
 
     # 2. Generate signal
     gen = LiveSignalGenerator(config)
-    result = gen.run(method=method, min_sharpe=min_sharpe,
-                     frequency=frequency, capital=capital,
-                     corr_threshold=corr_threshold)
+    result = gen.run(
+        method=method,
+        min_sharpe=min_sharpe,
+        min_sharpe_oos=min_sharpe_oos,
+        min_n_oos=min_n_oos,
+        frequency=frequency,
+        capital=capital,
+        corr_threshold=corr_threshold,
+        target_n_oos=target_n_oos,
+    )
     if not result:
         console.print('[red]No signal generated[/red]')
         return

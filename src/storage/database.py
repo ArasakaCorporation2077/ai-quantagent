@@ -10,6 +10,13 @@ from src.storage.models import TABLES
 
 logger = logging.getLogger(__name__)
 
+RANKING_METRICS = {
+    'sharpe': 'sharpe_ratio',
+    'sharpe_ratio': 'sharpe_ratio',
+    'sharpe_oos': 'sharpe_oos',
+    'sharpe_is': 'sharpe_is',
+}
+
 
 class Database:
     def __init__(self, db_path: Path | str):
@@ -90,24 +97,173 @@ class Database:
             )
             return cur.lastrowid
 
-    def get_top_alphas(self, min_sharpe: float = 0, limit: int = 20) -> list[dict]:
-        """Get top-performing alphas by Sharpe ratio (deduplicated per alpha)."""
+    def get_top_alphas(
+        self,
+        min_sharpe: float | None = None,
+        min_sharpe_oos: float | None = None,
+        min_n_oos: int = 0,
+        min_sharpe_is: float | None = None,
+        min_n_is: int = 0,
+        ranking_metric: str = 'sharpe',
+        limit: int = 20,
+    ) -> list[dict]:
+        """Get top-performing alphas with configurable ranking and OOS filters."""
+        ranking_column = RANKING_METRICS.get(ranking_metric)
+        if ranking_column is None:
+            raise ValueError(f'Unknown ranking metric: {ranking_metric}')
+
+        where_clauses = ['a.is_valid = 1']
+        params: list[object] = []
+
+        if min_sharpe is not None:
+            where_clauses.append('COALESCE(b.sharpe_ratio, -1e9) >= ?')
+            params.append(min_sharpe)
+        if min_sharpe_oos is not None:
+            where_clauses.append('COALESCE(b.sharpe_oos, -1e9) >= ?')
+            params.append(min_sharpe_oos)
+        if min_sharpe_is is not None:
+            where_clauses.append('COALESCE(b.sharpe_is, -1e9) >= ?')
+            params.append(min_sharpe_is)
+        if min_n_oos > 0:
+            where_clauses.append('COALESCE(b.n_oos, 0) >= ?')
+            params.append(min_n_oos)
+        if min_n_is > 0:
+            where_clauses.append('COALESCE(b.n_is, 0) >= ?')
+            params.append(min_n_is)
+
+        where_sql = ' AND '.join(where_clauses)
+        order_sql = (
+            f'CASE WHEN b.{ranking_column} IS NULL THEN 1 ELSE 0 END, '
+            f'b.{ranking_column} DESC, '
+            'b.sharpe_ratio DESC, '
+            'b.run_date DESC, '
+            'b.id DESC'
+        )
+
+        query = f'''
+            WITH ranked AS (
+                SELECT
+                    b.id AS backtest_result_id,
+                    a.id AS alpha_id,
+                    a.expression,
+                    a.frequency,
+                    s.strategy_text,
+                    s.category,
+                    b.sharpe_ratio,
+                    b.sortino_ratio,
+                    b.annualized_return,
+                    b.max_drawdown,
+                    b.total_return,
+                    b.win_rate,
+                    b.sharpe_oos,
+                    b.sharpe_is,
+                    b.n_oos,
+                    b.n_is,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY a.id
+                        ORDER BY {order_sql}
+                    ) AS rn
+                FROM backtest_results b
+                JOIN alphas a ON b.alpha_id = a.id
+                JOIN strategies s ON a.strategy_id = s.id
+                WHERE {where_sql}
+            )
+            SELECT
+                backtest_result_id,
+                alpha_id,
+                expression,
+                frequency,
+                strategy_text,
+                category,
+                sharpe_ratio,
+                sortino_ratio,
+                annualized_return,
+                max_drawdown,
+                total_return,
+                win_rate,
+                sharpe_oos,
+                sharpe_is,
+                n_oos,
+                n_is
+            FROM ranked
+            WHERE rn = 1
+            ORDER BY
+                CASE WHEN {ranking_column} IS NULL THEN 1 ELSE 0 END,
+                {ranking_column} DESC,
+                sharpe_ratio DESC,
+                backtest_result_id DESC
+            LIMIT ?
+        '''
+
         with self._conn() as conn:
-            rows = conn.execute(
-                '''SELECT a.expression, a.frequency, s.strategy_text, s.category,
-                          MAX(b.sharpe_ratio) as sharpe_ratio, b.sortino_ratio,
-                          b.annualized_return, b.max_drawdown, b.total_return,
-                          b.win_rate
-                   FROM backtest_results b
-                   JOIN alphas a ON b.alpha_id = a.id
-                   JOIN strategies s ON a.strategy_id = s.id
-                   WHERE b.sharpe_ratio >= ? AND a.is_valid = 1
-                   GROUP BY a.id
-                   ORDER BY sharpe_ratio DESC
-                   LIMIT ?''',
-                (min_sharpe, limit)
-            ).fetchall()
+            rows = conn.execute(query, (*params, limit)).fetchall()
             return [dict(r) for r in rows]
+
+    def get_backtests_missing_oos(
+        self,
+        frequency: str | None = None,
+        limit: int | None = None,
+    ) -> list[dict]:
+        """Return backtest rows that predate OOS metrics."""
+        where_clauses = [
+            '(b.sharpe_oos IS NULL OR b.sharpe_is IS NULL OR b.n_oos IS NULL OR b.n_is IS NULL)'
+        ]
+        params: list[object] = []
+
+        if frequency:
+            where_clauses.append('a.frequency = ?')
+            params.append(frequency)
+
+        limit_sql = ''
+        if limit is not None:
+            limit_sql = ' LIMIT ?'
+            params.append(limit)
+
+        query = f'''
+            SELECT
+                b.id AS backtest_result_id,
+                a.id AS alpha_id,
+                a.expression,
+                a.frequency
+            FROM backtest_results b
+            JOIN alphas a ON b.alpha_id = a.id
+            WHERE {' AND '.join(where_clauses)}
+            ORDER BY a.frequency, b.id
+            {limit_sql}
+        '''
+
+        with self._conn() as conn:
+            rows = conn.execute(query, params).fetchall()
+            return [dict(r) for r in rows]
+
+    def update_backtest_oos_metrics(self, backtest_result_id: int, metrics: dict):
+        """Update OOS/IS metrics for an existing backtest result."""
+        with self._conn() as conn:
+            conn.execute(
+                '''UPDATE backtest_results
+                   SET sharpe_oos = ?, sharpe_is = ?, n_oos = ?, n_is = ?
+                   WHERE id = ?''',
+                (
+                    metrics.get('sharpe_oos'),
+                    metrics.get('sharpe_is'),
+                    metrics.get('n_oos'),
+                    metrics.get('n_is'),
+                    backtest_result_id,
+                )
+            )
+
+    def count_backtests_missing_oos(self) -> int:
+        """Count backtest rows that still need OOS metrics backfilled."""
+        with self._conn() as conn:
+            row = conn.execute(
+                '''SELECT COUNT(*)
+                   FROM backtest_results
+                   WHERE sharpe_oos IS NULL
+                      OR sharpe_is IS NULL
+                      OR n_oos IS NULL
+                      OR n_is IS NULL'''
+            ).fetchone()
+            return row[0]
 
     def save_pipeline_run(self, stats: dict) -> int:
         """Record a pipeline run."""

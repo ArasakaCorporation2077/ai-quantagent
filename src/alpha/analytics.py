@@ -12,6 +12,7 @@ from rich.console import Console
 from rich.table import Table
 
 from src.alpha.evaluator import AlphaEvaluator, EvaluationError
+from src.orchestrator.scoring import compute_oos_score
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -193,18 +194,23 @@ def analyze_alpha_halflife(expression: str, data: dict[str, pd.DataFrame],
 
 
 def analyze_combined_halflife(alphas: list[dict], data: dict[str, pd.DataFrame],
-                              max_lag: int = 10, method: str = 'sharpe') -> dict:
+                              max_lag: int = 10, method: str = 'sharpe',
+                              target_n_oos: int = 60) -> dict:
     """Half-life analysis for combined alpha signal."""
     evaluator = AlphaEvaluator(data)
     close_df = _build_close_matrix(data)
 
     signals = []
-    sharpes = []
+    scores = []
     for a in alphas:
         try:
             sig = evaluator.evaluate(a['expression'])
             signals.append(sig)
-            sharpes.append(a.get('sharpe_ratio', 0))
+            scores.append(compute_oos_score(
+                a.get('sharpe_oos'),
+                a.get('n_oos'),
+                target_n_oos,
+            ))
         except (EvaluationError, Exception):
             pass
 
@@ -220,8 +226,8 @@ def analyze_combined_halflife(alphas: list[dict], data: dict[str, pd.DataFrame],
 
     n = len(signals)
     if method == 'sharpe':
-        total = sum(max(s, 0) for s in sharpes)
-        weights = [max(s, 0) / total for s in sharpes] if total > 0 else [1.0 / n] * n
+        total = sum(scores)
+        weights = [score / total for score in scores] if total > 0 else [1.0 / n] * n
     else:
         weights = [1.0 / n] * n
 
@@ -242,7 +248,7 @@ def analyze_combined_halflife(alphas: list[dict], data: dict[str, pd.DataFrame],
     hl_spread = estimate_half_life(spread_decay, 'mean_spread')
 
     return {
-        'expression': f'COMBINED ({n} alphas, {method})',
+        'expression': f'COMBINED ({n} alphas, {method}, OOS-first)',
         'ic_decay': ic_decay,
         'spread_decay': spread_decay,
         'half_life_ic': hl_ic,
@@ -250,8 +256,22 @@ def analyze_combined_halflife(alphas: list[dict], data: dict[str, pd.DataFrame],
     }
 
 
+def _ascii_bar(value: float, max_abs: float, width: int = 20) -> str:
+    """ASCII-only bar for Windows-safe console output."""
+    if pd.isna(value) or max_abs <= 0:
+        return ''
+    bar_len = int(abs(value) / max_abs * width)
+    if bar_len <= 0:
+        return ''
+    return ('+' if value > 0 else '-') * bar_len
+
+
 def print_halflife_report(result: dict):
     """Print formatted half-life analysis report."""
+    if result.get('error'):
+        console.print(f'[red]Error: {result["error"]}[/red]')
+        return
+
     expr = result.get('expression', '?')
     if len(expr) > 70:
         expr = expr[:67] + '...'
@@ -271,8 +291,13 @@ def print_halflife_report(result: dict):
     max_ic = ic_df['mean_ic'].abs().max()
     for _, row in ic_df.iterrows():
         ic = row['mean_ic']
-        bar_len = int(abs(ic) / max_ic * 20) if max_ic > 0 and not pd.isna(ic) else 0
-        bar_char = '[green]' + '█' * bar_len + '[/green]' if ic > 0 else '[red]' + '█' * bar_len + '[/red]'
+        bar_text = _ascii_bar(ic, max_ic)
+        if ic > 0:
+            bar_char = f'[green]{bar_text}[/green]'
+        elif ic < 0:
+            bar_char = f'[red]{bar_text}[/red]'
+        else:
+            bar_char = ''
 
         ic_style = 'green' if ic > 0 else 'red'
         t.add_row(
@@ -296,8 +321,13 @@ def print_halflife_report(result: dict):
     max_sp = sp_df['mean_spread'].abs().max()
     for _, row in sp_df.iterrows():
         sp = row['mean_spread']
-        bar_len = int(abs(sp) / max_sp * 20) if max_sp > 0 and not pd.isna(sp) else 0
-        bar_char = '[green]' + '█' * bar_len + '[/green]' if sp > 0 else '[red]' + '█' * bar_len + '[/red]'
+        bar_text = _ascii_bar(sp, max_sp)
+        if sp > 0:
+            bar_char = f'[green]{bar_text}[/green]'
+        elif sp < 0:
+            bar_char = f'[red]{bar_text}[/red]'
+        else:
+            bar_char = ''
 
         sp_style = 'green' if sp > 0 else 'red'
         t2.add_row(
