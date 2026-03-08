@@ -110,6 +110,46 @@ def report(ctx, top):
         console.print(a)
 
 
+@cli.command(name='half-life')
+@click.option('--min-sharpe', default=0.5, help='Minimum Sharpe to include')
+@click.option('--max-alphas', default=20, help='Max alphas to analyze')
+@click.option('--frequency', default='1d', help='Frequency (default: 1d)')
+@click.option('--max-lag', default=10, help='Maximum forward lag to test')
+@click.option('--combined', is_flag=True, help='Analyze combined signal instead of individual')
+@click.option('--method', default='sharpe', type=click.Choice(['equal', 'sharpe']),
+              help='Weighting method for combined analysis')
+@click.pass_context
+def half_life(ctx, min_sharpe, max_alphas, frequency, max_lag, combined, method):
+    """Analyze alpha signal half-life (IC and spread decay)."""
+    from src.alpha.analytics import (
+        analyze_alpha_halflife, analyze_combined_halflife, print_halflife_report
+    )
+    from src.backtest.engine import Backtester
+    from src.config import get_db_path
+    from src.storage.database import Database
+
+    config = ctx.obj['config']
+    db = Database(get_db_path(config))
+    bt = Backtester(config)
+
+    raw_alphas = db.get_top_alphas(min_sharpe=min_sharpe, limit=max_alphas)
+    raw_alphas = [a for a in raw_alphas if a['frequency'] == frequency]
+    console.print(f'Loaded {len(raw_alphas)} alphas (Sharpe >= {min_sharpe}, freq={frequency})')
+
+    data = bt.load_data(frequency)
+
+    if combined:
+        result = analyze_combined_halflife(raw_alphas, data, max_lag, method)
+        print_halflife_report(result)
+    else:
+        for a in raw_alphas[:5]:
+            try:
+                result = analyze_alpha_halflife(a['expression'], data, max_lag)
+                print_halflife_report(result)
+            except Exception as e:
+                console.print(f'[red]Error analyzing {a["expression"][:50]}: {e}[/red]')
+
+
 @cli.command()
 @click.option('--min-sharpe', default=0.5, help='Minimum Sharpe to include')
 @click.option('--max-alphas', default=50, help='Max alphas to consider')
